@@ -1,0 +1,25 @@
+# 模型权重（自行下载，不入库）
+models/
+*.gguf
+
+# llama.cpp 二进制与 CUDA 运行时（自行解压，不入库）
+app/
+*.zip
+
+# 运行日志
+logs/
+*.log
+
+# 本地配置（含个人路径/端口，用 models.example.json 代替）
+models.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pylib/
+tools/pylib/
+
+# GUI 自检产物
+gui-*.png
+gui-selftest.txt
+gui-error.log

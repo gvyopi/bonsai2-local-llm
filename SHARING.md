@@ -1,0 +1,138 @@
+# Bonsai 2 本地部署工具包
+
+在 **8 GB 显存的笔记本（RTX 5060 Laptop）** 上运行 Bonsai 2 三元量化模型（9B / 27B），并提供统一控制台接入 DeepSeek Harness（DSH）。
+
+## 这是什么
+
+一套已经在实机验证过的工具与配置：
+
+| 文件 | 作用 |
+|---|---|
+| `llmctl-core.ps1` | 核心层：配置加载 + 12 个函数，零输出，可被 CLI/GUI 复用 |
+| `llmctl.ps1` | 命令行入口：`status` / `start` / `stop` / `tiers` / `log` / `ollama` |
+| `llmctl-gui.ps1` | WinForms 图形界面（后台线程采集，不卡顿） |
+| `launch-gui.vbs` | 双击启动 GUI，不弹控制台 |
+| `models.json` | 模型清单 + 上下文档位表（相对路径，可复制到任意目录） |
+| `probe-context.ps1` | 自动探测显卡能承载的最大上下文 |
+| `使用说明.md` | llama.cpp 调参方法论（显存公式、定参四步法） |
+| `本地模型风险清单.md` | 25 条风险 + 分级 + 事故处理 Runbook |
+| `tools/validate-patch.py` | DSH 配置 YAML 校验（改配置前必跑） |
+
+## 核心数据（RTX 5060 Laptop 8 GB 实测）
+
+### Bonsai 2 9B（PQ2_0，2.25 GB）
+
+| 上下文 | 峰值显存 | 生成速度 | 适合 |
+|---|---:|---:|---|
+| 32K | 3,424 MiB | 79 tok/s | 日常对话 + 工具调用 |
+| 64K | 4,480 MiB | 81 tok/s | 长文档摘要 |
+| **128K** | 6,592 MiB | 76 tok/s | 整本手册 / 大代码库 |
+| 160K | 7,648 MiB | 82 tok/s | 极限档，余量仅 503 MiB |
+| 192K+ | 7,828 MiB | **11.8 tok/s** | ❌ 名义能跑，实际不可用 |
+
+### Bonsai 2 27B（PTQ1_0，5.54 GB）
+
+| 上下文 | 峰值显存 | 生成速度 |
+|---|---:|---:|
+| 8K | 6,334 MiB | 50 tok/s |
+| 16K | 6,854 MiB | 50 tok/s |
+| 32K | 7,832 MiB | 50 tok/s（余量仅 319 MiB） |
+
+### 中文事实性（同一道题：介绍杭州）
+
+- **qwen3:8b**：✅ 全对，含"古称临安"
+- **Bonsai 27B**：✅ 无硬伤
+- **Bonsai 9B**：❌ 三处硬伤（"六朝古都"指杭州、苏轼"欲罢不能"、马云当"科技巨头"）
+
+**结论：Bonsai 适合语言组织、代码、结构化输出；中文事实类内容用 qwen3 或人工核对。**
+
+## 快速开始
+
+### 1. 准备环境
+
+```powershell
+# 要求：Windows + PowerShell 7 + NVIDIA 驱动（支持你显卡的 CUDA 版本）
+# 1) 下载 PrismML 的 llama.cpp fork（必须用 fork，上游不支持 PTQ1_0）
+#    https://github.com/PrismML-Eng/llama.cpp/releases
+#    选 win-cuda-<你的版本>-x64.zip + 对应的 cudart 包，一起解压到 .\app
+
+# 2) 下载模型（放 .\models 目录）
+#    9B  : https://hf-mirror.com/prism-ml/Ternary-Bonsai-2-9B-gguf
+#    27B : https://hf-mirror.com/prism-ml/Ternary-Bonsai-2-27B-gguf
+#    9B 用 PQ2_0（2.42 GB）；27B 用 PTQ1_0（5.54 GB，PQ2_0 装不下）
+```
+
+### 2. 验证
+
+```powershell
+.\llmctl.ps1 status        # 应能看到三个模型
+.\llmctl.ps1 tiers 9b      # 查看上下文档位表
+.\probe-context.ps1        # 探测你这张卡的真实上限
+```
+
+### 3. 启动
+
+```powershell
+.\llmctl.ps1 start 9b              # 默认 128K
+.\llmctl.ps1 start 27b -Ctx 32768  # 27B 必须 32K，否则 DSH 会截断
+.\llmctl.ps1 stop                  # 释放显存
+```
+
+或双击 `launch-gui.vbs` 用图形界面。
+
+## 接入 DSH
+
+在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `llm-pi-ai.config.providers` 下添加：
+
+```yaml
+bonsai-9b:
+  apiKeyEnv: OLLAMA_API_KEY      # 任意已配置的 key，llama-server 不校验
+  api: openai-completions
+  baseURL: http://127.0.0.1:8080/v1
+  models:
+    - id: bonsai-2-9b
+      name: Bonsai 2 9B (三元, 128K)
+      contextWindow: 131072
+      maxTokens: 8192
+      input:
+        - text
+```
+
+**三个必须知道的约束**：
+
+1. **DSH 固定 prompt 约 10.4K token**（system prompt + 工具定义），32K 上下文里只剩 21K 可用
+2. **27B 用 16K 会被截断**：实测最后一条请求只生成 1 个 token，必须 32K
+3. **`contextWindow` 必须 ≤ 服务端 `-c`**，否则 DSH 按错误值提前压缩
+
+## 关键坑（避坑指南）
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 输出乱码但无报错 | 引擎认得 Q2_0 但不认识 Bonsai 的 Hadamard 变换 | 用 PrismML fork，检查日志 `ftype` 行 |
+| 速度掉到 <10 tok/s 但无报错 | 显存不足，静默降级到 CPU | 查日志 `offloaded X/Y`，X 必须等于 Y |
+| 中文 prompt 乱码 | Windows 命令行编码 | 用 UTF-8 文件 + `-f` |
+| 答案只有半句 | 思考 token 吃掉了输出预算 | `-n` 给 2048+，或 `-rea off` |
+| `invalid stoi argument` | PowerShell 里 `'a'+'b' -f x` 只格式化最后一段 | 改用双引号插值 |
+| GUI 点按钮没反应 | `.GetNewClosure()` 会让 `$script:` 失效 | 用 `$sender.Tag` 定位 |
+| `.vbs` 报"未结束的字符串常量" | wscript 按 ANSI 读取 UTF-8 中文 | 文件保持纯 ASCII，用 `Chr(34)` 拼引号 |
+
+## 显存预算公式
+
+```
+可用上下文 ≈ (总显存 − 权重 − 线性注意力状态 − 计算缓冲 − 安全余量) / 每 token 开销
+```
+
+Bonsai 9B 实测：权重 2305 MiB，KV 约 32 MiB/1000 token，固定开销约 650 MiB。
+
+## 许可证
+
+- 工具脚本：MIT
+- 模型：Apache 2.0（Bonsai 2 / Qwen 底座），分发前请自行确认底座条款
+- **本仓库不含模型权重**，请按上面的链接自行下载
+
+## 相关链接
+
+- Bonsai 2 文档：<https://docs.prismml.com>
+- PrismML llama.cpp：<https://github.com/PrismML-Eng/llama.cpp/releases>
+- 上游合并版本：llama.cpp `b11556`
+- DeepSeek Harness：<https://github.com/deepseek-ai/deepseek-harness>
