@@ -14,6 +14,7 @@
 | `launch-gui.vbs` | 双击启动 GUI，不弹控制台 |
 | `models.example.json` | 示例模型清单（改名为 `models.json` 即用，合法 JSON，无注释语法） |
 | `probe-context.ps1` | 自动探测显卡能承载的最大上下文 |
+| `tools/bench-speed.ps1` | 带**预热 + 时钟检查**的测速脚本，读数口径见风险清单 6.4 |
 | `使用说明.md` | llama.cpp 调参方法论（显存公式、定参四步法、思考模式） |
 | `本地模型风险清单.md` | 26 条风险 + 分级 + 事故处理 Runbook |
 | `tools/check-yaml.js` | DSH 配置校验器：能抓出非法字段名与 `reasoningEfforts` 类型错误 |
@@ -39,6 +40,11 @@
 | 16K | 6,854 MiB | 50 tok/s |
 | 32K | 7,832 MiB | 50 tok/s（余量仅 319 MiB） |
 
+> **读数口径**：上面两张表的 tok/s 是**未预热**读数，**属于偏低估计**——GPU 空闲时核心时钟只有
+> ~210 MHz（上限 3090），模型刚加载完就计时会明显偏低。预热到时钟 92% 后重测 9B@128K 得
+> **110.7 tok/s**（表内记的是 76）。**尚未系统性重测**，横向比较请只用同一批数据；
+> 要自己标定就跑 `tools\bench-speed.ps1`（口径见风险清单 §6.4）。
+
 ### 中文事实性（同一道题：介绍杭州）
 
 - **qwen3:8b**：✅ 全对，含"古称临安"
@@ -47,12 +53,20 @@
 
 **结论：Bonsai 适合语言组织、代码、结构化输出；中文事实类内容用 qwen3 或人工核对。**
 
+## 运行环境
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| Shell | **PowerShell 7（`pwsh.exe`）** | 所有 `.ps1` 首行是 `#requires -Version 7.0`。用 Windows 自带的 PowerShell 5.1 运行会立即报 `ScriptRequiresUnmatchedPSVersion` 并退出——**那是版本守卫，不是脚本损坏** |
+| 调用方式 | `pwsh -NoProfile -File .\llmctl.ps1 status` | 不要用 `powershell.exe -File`；双击 `.ps1` 默认是用记事本打开，不会执行 |
+| 显卡驱动 | 支持你显卡的 CUDA 版本 | **不需要装 CUDA Toolkit**，运行时库随 llama.cpp 压缩包一起解压 |
+| 系统 | Windows 10/11 x64 | 路径尽量不带中文：原生 exe 对非 ASCII 路径支持不稳（编码问题会伪装成"模型输出乱码"） |
+
 ## 快速开始
 
 ### 1. 准备环境
 
 ```powershell
-# 要求：Windows + PowerShell 7 + NVIDIA 驱动（支持你显卡的 CUDA 版本）
 # 1) 下载 PrismML 的 llama.cpp fork（必须用 fork，上游不支持 PTQ1_0）
 #    https://github.com/PrismML-Eng/llama.cpp/releases
 #    选 win-cuda-<你的版本>-x64.zip + 对应的 cudart 包，一起解压到 .\app
