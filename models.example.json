@@ -1,9 +1,8 @@
-# ---------------------- 复制到项目目录即可用的示例配置 ----------------------
-# 用法：把本文件改名为 models.json 放在项目根目录（与 llmctl.ps1 同级）。
-# 路径写法：以 .\ 开头表示相对项目根目录；也可写绝对路径。
-# %ENV% 形式会展开环境变量。
-
 {
+  "_comment": "示例配置。把本文件改名为 models.json、放在项目根目录（与 llmctl.ps1 同级）即可使用。",
+  "_pathNote": "路径写法：以 .\\\\ 开头表示相对项目根目录；也可写绝对路径；%ENV% 形式会展开环境变量。",
+  "_note": "本文件是合法 JSON，可直接改名使用；如需注释，请用 _ 开头的字段（加载器会忽略它们）。",
+
   "app": ".\\app",
   "logDir": ".\\logs",
   "ollamaExe": "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe",
@@ -19,6 +18,8 @@
       "ctx": 131072,
       "maxCtx": 163840,
       "vram": 6592,
+      "reasoningEffortAllow": "none,low,medium,xhigh",
+      "reasoningEffortFallback": "medium",
       "tiers": [
         { "ctx": 32768,  "vram": 3424, "use": "日常对话 + 工具调用" },
         { "ctx": 65536,  "vram": 4480, "use": "长文档摘要" },
@@ -36,22 +37,30 @@
       "ctx": 32768,
       "maxCtx": 32768,
       "vram": 7832,
+      "reasoningBudget": 6144,
+      "reasoningEffortAllow": "none,low,medium,xhigh",
+      "reasoningEffortFallback": "medium",
       "tiers": [
         { "ctx": 8192,  "vram": 6334, "use": "短问答" },
         { "ctx": 16384, "vram": 6854, "use": "不推荐：DSH 会截断" },
         { "ctx": 32768, "vram": 7832, "use": "DSH 唯一可用档" }
       ]
     }
-  ]
-}
+  ],
 
-# ---------------------- 字段说明 ----------------------
-# key      : 命令行里用的短名（llmctl.ps1 start 9b）
-# kind     : llama = 走 llama-server；ollama = 交给 Ollama 管理
-# file     : llama 时是 gguf 路径；ollama 时是模型名（如 qwen3:8b-16k）
-# alias    : 暴露给 OpenAI API 的 model 名，DSH 配置里的 id 要和它一致
-# port     : 监听端口（只绑 127.0.0.1）
-# ctx      : 默认上下文
-# maxCtx   : 上限，-Ctx 超过会被截断到这里
-# vram     : 该档位的显存估算（MiB），仅用于显示
-# tiers    : 可选档位表，GUI 下拉框和 `llmctl.ps1 tiers <key>` 都读它
+  "_fields": {
+    "key": "命令行里用的短名，例如 llmctl.ps1 start 9b",
+    "kind": "llama = 走 llama-server；ollama = 交给 Ollama 管理",
+    "name": "显示名，用于控制台和 GUI",
+    "file": "llama 时是 gguf 路径；ollama 时是模型名（如 qwen3:8b-16k）",
+    "alias": "暴露给 OpenAI API 的 model 名，DSH 配置里的 id 必须与它一致",
+    "port": "监听端口，只绑 127.0.0.1",
+    "ctx": "默认上下文长度",
+    "maxCtx": "上下文上限，-Ctx 超过会被截断到这里",
+    "vram": "该档位的显存估算（MiB），仅用于显示",
+    "tiers": "可选档位表，GUI 下拉框和 llmctl.ps1 tiers <key> 都读它",
+    "reasoningBudget": "思考 token 上限。省略或 -1 = 不限制；0 = 立即结束思考；N>0 = 预算，耗尽时优雅收尾。对应 llama-server 的 --reasoning-budget",
+    "reasoningEffortAllow": "档位白名单，逗号分隔。列表外的值交给 reasoningEffortFallback，避免模板抛 HTTP 500。对应 --reasoning-effort-allow",
+    "reasoningEffortFallback": "白名单外的值替换成什么，默认 medium。对应 --reasoning-effort-fallback"
+  }
+}

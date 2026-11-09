@@ -12,10 +12,11 @@
 | `llmctl.ps1` | 命令行入口：`status` / `start` / `stop` / `tiers` / `log` / `ollama` |
 | `llmctl-gui.ps1` | WinForms 图形界面（后台线程采集，不卡顿） |
 | `launch-gui.vbs` | 双击启动 GUI，不弹控制台 |
-| `models.json` | 模型清单 + 上下文档位表（相对路径，可复制到任意目录） |
+| `models.example.json` | 示例模型清单（改名为 `models.json` 即用，合法 JSON，无注释语法） |
 | `probe-context.ps1` | 自动探测显卡能承载的最大上下文 |
-| `使用说明.md` | llama.cpp 调参方法论（显存公式、定参四步法） |
-| `本地模型风险清单.md` | 25 条风险 + 分级 + 事故处理 Runbook |
+| `使用说明.md` | llama.cpp 调参方法论（显存公式、定参四步法、思考模式） |
+| `本地模型风险清单.md` | 26 条风险 + 分级 + 事故处理 Runbook |
+| `tools/check-yaml.js` | DSH 配置校验器：能抓出非法字段名与 `reasoningEfforts` 类型错误 |
 | `tools/validate-patch.py` | DSH 配置 YAML 校验（改配置前必跑） |
 
 ## 核心数据（RTX 5060 Laptop 8 GB 实测）
@@ -98,11 +99,12 @@ bonsai-9b:
         - text
 ```
 
-**三个必须知道的约束**：
+**四个必须知道的约束**：
 
 1. **DSH 固定 prompt 约 10.4K token**（system prompt + 工具定义），32K 上下文里只剩 21K 可用
 2. **27B 用 16K 会被截断**：实测最后一条请求只生成 1 个 token，必须 32K
-3. **`contextWindow` 必须 ≤ 服务端 `-c`**，否则 DSH 按错误值提前压缩
+3. **27B 要配 `maxTokens: 12288`**：8192 时思考会吃光预算、正文为空。32K 下 `32768 − 12288 − 10400 ≈ 10080` 才是真正的对话空间，连续两轮重任务会越界
+4. **`contextWindow` 必须 ≤ 服务端 `-c`**，否则 DSH 按错误值提前压缩
 
 ## 关键坑（避坑指南）
 
@@ -111,7 +113,9 @@ bonsai-9b:
 | 输出乱码但无报错 | 引擎认得 Q2_0 但不认识 Bonsai 的 Hadamard 变换 | 用 PrismML fork，检查日志 `ftype` 行 |
 | 速度掉到 <10 tok/s 但无报错 | 显存不足，静默降级到 CPU | 查日志 `offloaded X/Y`，X 必须等于 Y |
 | 中文 prompt 乱码 | Windows 命令行编码 | 用 UTF-8 文件 + `-f` |
-| 答案只有半句 | 思考 token 吃掉了输出预算 | `-n` 给 2048+，或 `-rea off` |
+| 答案只有半句 / 正文为空 | 思考 token 吃掉了输出预算 | 服务端配 `--reasoning-budget`；或 `-n` 给 2048+ |
+| 客户端发 `high`/`max` 报 HTTP 500 | 模板只认 `xhigh`/`medium`/`low`，其余 `raise_exception` | 加 `--reasoning-effort-allow` + `--reasoning-effort-fallback` |
+| DSH 模型列表突然全空 | `reasoningEfforts` 写成了列表，或用了不存在的 `reasoningEffort` | 改成字典形式，改完先跑 `tools/check-yaml.js` |
 | `invalid stoi argument` | PowerShell 里 `'a'+'b' -f x` 只格式化最后一段 | 改用双引号插值 |
 | GUI 点按钮没反应 | `.GetNewClosure()` 会让 `$script:` 失效 | 用 `$sender.Tag` 定位 |
 | `.vbs` 报"未结束的字符串常量" | wscript 按 ANSI 读取 UTF-8 中文 | 文件保持纯 ASCII，用 `Chr(34)` 拼引号 |
@@ -123,6 +127,22 @@ bonsai-9b:
 ```
 
 Bonsai 9B 实测：权重 2305 MiB，KV 约 32 MiB/1000 token，固定开销约 650 MiB。
+
+## 思考控制（27B 的默认档是 `xhigh`）
+
+模板里写死 `reasoning_effort|default('xhigh')`，且只接受 `xhigh`/`medium`/`low`。三处可调，粒度从小到大：
+
+| 层 | 参数 | 本项目取值 |
+|---|---|---|
+| 输出总预算 | DSH `maxTokens` | 27B = `12288` |
+| 思考上限 | `--reasoning-budget` | 27B = `6144` |
+| 档位 | `--reasoning-effort` | 不设（=模板默认 `xhigh`） |
+
+`models.json` 里对应三个可选字段：`reasoningBudget` / `reasoningEffortAllow` / `reasoningEffortFallback`，启动器会自动拼进命令行；字段缺失时行为与旧版一致。
+
+**降档不等于缩短思考。** 同一道题 `temp=0` 实测：`low` 想了 3976 字符还答错，`xhigh` 只 2068 字符且答对。想省预算靠 `--reasoning-budget`，不靠调档位。
+
+**关闭思考用 `none`，不是 `off`。** `off` 不在白名单里，会被回退成 `medium`。
 
 ## 许可证
 

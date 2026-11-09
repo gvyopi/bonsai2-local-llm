@@ -43,6 +43,10 @@ foreach ($m in $Config.models) {
         File = if ($m.kind -eq 'ollama') { $m.file } else { Resolve-CfgPath $m.file }
         Alias = $m.alias; Port = [int]$m.port; Ctx = [int]$m.ctx
         MaxCtx = [int]$m.maxCtx; Vram = [int]$m.vram
+        # 思考控制（可选）：-1 表示不加 --reasoning-budget，保持模板默认的“无上限”
+        ReasoningBudget         = if ($null -ne $m.reasoningBudget) { [int]$m.reasoningBudget } else { -1 }
+        ReasoningEffortAllow    = $m.reasoningEffortAllow
+        ReasoningEffortFallback = $m.reasoningEffortFallback
         Tiers = @($m.tiers)
     }
 }
@@ -159,10 +163,31 @@ function Start-LlmModel {
     $ctx = if ($CtxOverride -gt 0) { $CtxOverride } else { $m.Ctx }
     if ($ctx -gt $m.MaxCtx) { $ctx = $m.MaxCtx }
 
+    # 思考控制参数校验：宁可拒绝启动，也不要带着错参数跑起来
+    $validEfforts = @('off','minimal','low','medium','high','xhigh','max','none')
+    if ($m.ReasoningBudget -lt -1) {
+        return [pscustomobject]@{ Ok=$false; Code=1; Message="reasoningBudget 必须 >= -1（-1=不限制，0=立即结束思考），当前 $($m.ReasoningBudget)"; Pid=$null }
+    }
+    if ($m.ReasoningEffortFallback -and $validEfforts -notcontains $m.ReasoningEffortFallback) {
+        return [pscustomobject]@{ Ok=$false; Code=1; Message="reasoningEffortFallback 非法: $($m.ReasoningEffortFallback)（可选 $($validEfforts -join '/')）"; Pid=$null }
+    }
+    if ($m.ReasoningEffortAllow) {
+        $badAllow = @($m.ReasoningEffortAllow -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $validEfforts -notcontains $_ })
+        if ($badAllow.Count -gt 0) {
+            return [pscustomobject]@{ Ok=$false; Code=1; Message="reasoningEffortAllow 含非法档位: $($badAllow -join ', ')"; Pid=$null }
+        }
+    }
+
     # 注意：必须用双引号插值。PowerShell 中 -f 优先级高于 +，'a'+'b' -f x 只会格式化最后一段。
     $argLine = "-m `"$($m.File)`" -ngl 99 -fa on -c $ctx -a $($m.Alias) -np 1 -cram 24576 " +
                "--host 127.0.0.1 --port $($m.Port) --no-webui " +
                "--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05 --presence-penalty 1.0 --repeat-penalty 1.0"
+
+    # 思考预算：限制思考 token 数，耗尽时由 llama-server 注入收尾提示，避免整包预算耗在思考里
+    if ($m.ReasoningBudget -ge 0) { $argLine += " --reasoning-budget $($m.ReasoningBudget)" }
+    # 档位白名单 + 回退：非法档位（minimal/high/max）改为映射，而不是直达模板抛出 HTTP 500
+    if ($m.ReasoningEffortAllow)    { $argLine += " --reasoning-effort-allow $($m.ReasoningEffortAllow)" }
+    if ($m.ReasoningEffortFallback) { $argLine += " --reasoning-effort-fallback $($m.ReasoningEffortFallback)" }
 
     $outLog = Join-Path $LogDir "serve-$Key.out.log"
     $errLog = Join-Path $LogDir "serve-$Key.err.log"

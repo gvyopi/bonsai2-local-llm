@@ -219,6 +219,7 @@ GUI 回归自检：`.\llmctl.ps1 gui -SelfTest -ClickTest`（结果写入 `logs\
 | **`contextWindow` 必须 ≤ 服务端 `-c`** | 否则 DSH 按配置提前压缩，多余上下文浪费 |
 | **DSH 固定 prompt 约 10.4K** | system prompt + 工具定义；32K 里只剩 ~21K 给对话 |
 | **27B 用 16K 会截断** | 实测最后一条请求只生成 1 个 token，DSH 报"输出上限"；换 32K 后正常 |
+| **27B 要配 `maxTokens: 12288`** | 8192 时思考吃光预算、正文为空；32K 下 `32768 − 12288 − 10400 ≈ 10080` 才是真正的对话空间 |
 | **服务与 DSH 独立** | 关 DSH 不会停服务（显存还占着）；停服务后选该模型会连接失败 |
 
 ### 实测：9B vs 27B（都在 DSH 里跑同一工具任务）
@@ -243,8 +244,10 @@ GUI 回归自检：`.\llmctl.ps1 gui -SelfTest -ClickTest`（结果写入 `logs\
 | **9B 中文事实性弱** | 三次测试三处硬伤（苏轼、马云、"六朝古都"指杭州） | 事实类内容必须核对 |
 | **空目录被漏报** | 两个模型都说"无子文件夹"，实际有 | **疑似 DSH 的 fs 工具未返回空目录**，非模型问题 |
 | **16K 下截断** | 27B 在 DSH 里生成 1 个 token 就停 | 必须 32K |
+| **思考吃光输出预算** | 27B 默认档为 `xhigh`，思考可占满整个 `maxTokens`，正文为空 | 上调 `maxTokens` 到 12288 + `--reasoning-budget 6144` |
+| **非法档位触发 500** | `minimal`/`high`/`max` 让模板抛异常 | 配 `--reasoning-effort-allow` + `--reasoning-effort-fallback` |
 
-## 上下文档位与思考开关
+## 上下文档位与思考控制
 
 ### 9B 上下文档位（实测）
 
@@ -261,21 +264,81 @@ GUI 回归自检：`.\llmctl.ps1 gui -SelfTest -ClickTest`（结果写入 `logs\
 
 `.\llmctl.ps1 tiers 9b` 可随时查看此表；GUI 里切换档位时底部会显示该档用途。
 
-### 思考开关
+### 思考控制（三层，从粗到细）
 
-Bonsai 与 qwen3 默认都开思考。DSH 侧通过模型级字段控制（`llm-pi-ai` 原生支持）：
+Bonsai 是推理模型，思考会占用输出预算。三处可调，粒度从小到大：
+
+| 层 | 位置 | 作用 | 本项目取值 |
+|---|---|---|---|
+| 输出总预算 | DSH `maxTokens` | 思考 + 正文的总上限 | 27B = `12288` |
+| 思考上限 | `--reasoning-budget N` | 思考最多花多少 token，超了自动收尾 | 27B = `6144` |
+| 档位 | `--reasoning-effort LEVEL` | 模板内的思考指令 | 不设（=模板默认 `xhigh`） |
+
+配置分散在两处：
+
+```json
+// models.json（服务端）
+"reasoningBudget": 6144,
+"reasoningEffortAllow": "none,low,medium,xhigh",
+"reasoningEffortFallback": "medium"
+```
+
+启动后命令行会带上：
+
+```
+--reasoning-budget 6144 --reasoning-effort-allow none,low,medium,xhigh --reasoning-effort-fallback medium
+```
+
+#### 为什么必须有白名单
+
+模板里写死了只接受三档：
+
+```jinja
+{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+{%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+    {{- raise_exception('Unexpected reasoning effort ...') }}
+```
+
+客户端发 `minimal`/`high`/`max` 会让模板抛异常 → **HTTP 500**。白名单 + fallback 把非法档位换成 `medium`，实测 `high` 与 `medium` 输出逐字节相同。
+
+关闭思考用 `none`（`off` 不在白名单里，会被回退成 `medium`）。
+
+#### DSH 侧显式声明档位（可选，当前未启用）
+
+`llm-pi-ai` 的模型字段名是 **`reasoningEfforts`（复数）**，值是**字典**，键取自 `off/minimal/low/medium/high/xhigh/max`，值是该档位真正发给服务的拼写：
 
 ```yaml
 models:
-  - id: bonsai-2-9b
-    reasoningEffort: medium   # none / minimal / low / medium / high / xhigh
+  - id: bonsai-2-27b
+    reasoningEfforts:
+      off: none
+      low: low
+      medium: medium
+      high: xhigh
 ```
 
-已对 9B 设为 `medium`（原来默认 xhigh，实测会烧掉 800+ token 在思考上）。
+⚠️ **写成列表会让整个 provider 加载失败**，DSH 的模型选择器直接变空：
 
-- 改这个字段需要**重启 DSH** 生效
-- 想运行时切换、不重启：装社区插件 `dsh-better-reasoning-effort`（在官方 Models 设置卡片里按模型切档）
-- 命令行临时关：`llama-cli ... -rea off`，或请求体加 `"reasoning_effort": "none"`
+```yaml
+reasoningEfforts:      # ✗ schema 是 z.dict，不是数组
+  - none
+  - low
+```
+
+`reasoningEffort`（单数）**不是合法字段**，写了不生效。模型的合法字段只有 `id`/`name`/`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`/`compat`。改完用 `tools/check-yaml.js` 校验后再重启 DSH。
+
+另：`llm-pi-ai` 的 `thinkingFormat` 默认 `openai`，即 `reasoning_effort`，与 llama-server 天然一致，不需要额外 `compat`。
+
+#### 27B 在 DSH 的实测（2026-11-09）
+
+| 题 | completion | 思考 ≈ | 正文字符 | 结果 |
+|---|---:|---:|---:|---|
+| 计数推理（求 242） | 5560 | 5010 | 2129 | ✓ `finish=stop`，答案正确 |
+| 代码缺陷分析 | 5347 | 700 | 11065 | ✓ `finish=stop` |
+
+两道题都没碰到 6144 的思考上限，说明预算**不干扰正常推理**，只在病态长思考时才触发优雅收尾。
+
+对话空间算式：`32768 − 12288(maxTokens) − 10400(DSH 固定开销) ≈ 10080`。一个重任务后余量约 2.6K，**连续两轮重任务会越过输入上限**。
 
 ## 相关链接
 
@@ -284,7 +347,6 @@ models:
 - 文档：<https://docs.prismml.com>
 - 二进制来源：<https://github.com/PrismML-Eng/llama.cpp/releases>
 - 上游合并 PR 对应版本：llama.cpp `b11556`（2026-10-11，"support for Prism Bonsai 2 27B"）
-
 
 
 
